@@ -45,7 +45,7 @@ static void rsp_message_received_function(safebuffer_t *sb, rsp_packet_type_t pa
     }
 }
 
-static void \thread_fn(void) {
+static void thread_fn(void) {
     uint8_t rsp_instance;
     
     rsp_instance = init_rs_protocol(rsp_message_received_function, 'R', 'S');
