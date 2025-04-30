@@ -1,0 +1,15 @@
+menuconfig RS_PROTOCOL
+    bool "RS Protocol"
+	default y
+
+if RS_PROTOCOL
+
+config RS_PROTOCOL_MAX_INSTANCES
+    int "RS Protocol max instances"
+    default 2
+
+endif # RS_PROTOCOL
+
+module = RS_PROTOCOL
+module-str = RS Protocol
+source "subsys/logging/Kconfig.template.log_config"
