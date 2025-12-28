@@ -48,5 +48,7 @@ int rs_protocol_build(safebuffer_t *sb, uint8_t *data, uint16_t len, uint8_t ins
 int rs_protocol_build_header(uint8_t *out, uint8_t *data, uint16_t len, uint8_t instance_num);
 int rs_protocol_add_packet_header(safebuffer_t *sb, uint8_t *data, uint16_t len, uint8_t instance_num);
 int rs_protocol_process_data(uint8_t *data, uint32_t len, uint8_t instance_num, void *source);
+safebuffer_t *rs_protocol_build_single_param(uint8_t *buf, uint32_t len, uint8_t instance_num);
+safebuffer_t *rs_protocol_build_multiple_params(uint8_t **buf, uint32_t *len, uint32_t num_items, uint8_t instance_num);
 
 #endif /* RS_PROTOCOL_H_ */

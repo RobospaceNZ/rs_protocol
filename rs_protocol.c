@@ -219,6 +219,46 @@ int rs_protocol_add_packet_header(safebuffer_t *sb, uint8_t *data, uint16_t len,
     return 0;
 }
 
+// Build a protocol packet with a single parameter that can be sent to another device
+// Return safebuffer must be freed by the caller
+safebuffer_t *rs_protocol_build_single_param(uint8_t *buf, uint32_t len, uint8_t instance_num) {
+    safebuffer_t *sb;
+
+    sb = safebuffer_malloc(len + HEADER_BUF_SIZE);
+    if (sb) {
+        memcpy(sb->buf + HEADER_BUF_SIZE, buf, len);
+        rs_protocol_build_header(sb->buf, buf, len, instance_num);
+        sb->write_index = len + HEADER_BUF_SIZE;
+        sb->len = sb->write_index;
+        sb->full = true;
+    }
+    return sb;
+}
+
+// Build a protocol packet with multiple parameters that can be sent to another device
+// Return safebuffer must be freed by the caller
+safebuffer_t *rs_protocol_build_multiple_params(uint8_t **buf, uint32_t *len, uint32_t num_items, uint8_t instance_num) {
+    uint32_t total_len = HEADER_BUF_SIZE;
+    uint32_t i;
+
+    for (i = 0; i < num_items; i++) {
+        total_len += len[i];
+    }
+    safebuffer_t *sb = safebuffer_malloc(total_len);
+    if (sb) {
+        uint8_t *p = &sb->buf[HEADER_BUF_SIZE];
+        for (i = 0; i < num_items; i++) {
+            memcpy(p, buf[i], len[i]);
+            p += len[i];
+        }
+        rs_protocol_build_header(sb->buf, &sb->buf[HEADER_BUF_SIZE], total_len - HEADER_BUF_SIZE, instance_num);
+        sb->write_index = total_len;
+        sb->len = sb->write_index;
+        sb->full = true;
+    }
+    return sb;
+}
+
 // Process a byte that was received. If a complete message was received then the callback function will be called
 int rs_protocol_process_data(uint8_t *data, uint32_t len, uint8_t instance_num, void *source) {
     rs_protocol_data_t *rsp;
