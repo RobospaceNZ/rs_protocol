@@ -75,10 +75,12 @@ Under remotes, add:
 ```
 
 Under projects, add:
+```
     - name: rs_protocol
       remote: rs_protocol
       revision: V1.0.1
       path: modules/lib/rs_protocol
+```
 
 Open command prompt in C:\ncs\v2.9.0. Remember to update b620d30767 if you use a different NCS (See C:\ncs\toolchains\toolchains.json for the version codes). Run the following:
 ```
