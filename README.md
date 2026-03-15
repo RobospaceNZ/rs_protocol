@@ -78,7 +78,7 @@ Under projects, add:
 ```
     - name: rs_protocol
       remote: rs_protocol
-      revision: V1.0.1
+      revision: V1.0.2
       path: modules/lib/rs_protocol
 ```
 

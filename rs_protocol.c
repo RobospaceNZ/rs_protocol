@@ -259,6 +259,21 @@ safebuffer_t *rs_protocol_build_multiple_params(uint8_t **buf, uint32_t *len, ui
     return sb;
 }
 
+int rs_protocol_reset_receive(uint8_t instance_num) {
+    rs_protocol_data_t *rsp;
+
+    if (instance_num >= rs_protocol_num_instances) {
+        return -EINVAL;   // index out of range
+    }
+    rsp = rs_protocol_data[instance_num];
+    rsp->state = RS_HEADER_BYTE_1;
+    if (rsp->sb) {
+        safebuffer_free(rsp->sb);
+        rsp->sb = NULL;
+    }
+    return 0;
+}
+
 // Process a byte that was received. If a complete message was received then the callback function will be called
 int rs_protocol_process_data(uint8_t *data, uint32_t len, uint8_t instance_num, void *source) {
     rs_protocol_data_t *rsp;
