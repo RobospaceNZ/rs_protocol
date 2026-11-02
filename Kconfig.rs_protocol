@@ -1,6 +1,6 @@
 menuconfig RS_PROTOCOL
     bool "RS Protocol"
-	default y
+	select SAFEBUFFER
 	select CRC if !RS_PROTOCOL_CRC_TABLE
 
 if RS_PROTOCOL

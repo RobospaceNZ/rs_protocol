@@ -1,0 +1,6 @@
+name: rs_protocol
+build:
+  cmake: .
+  kconfig: Kconfig.rs_protocol
+  depends:
+    - safebuffer

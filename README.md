@@ -142,8 +142,20 @@ This library has a dependency on safebuffer:
 
 https://github.com/RobospaceNZ/safebuffer
 
-rs_protocol V2.0.0 works with safebuffer V1.0.2 and V2.0.0. Older versions of rs_protocol set `sb->p_gp`, which was
-removed in safebuffer V2.0.0, so they only work with safebuffer V1.x.
+rs_protocol V2.1.0 needs safebuffer V2.1.0 or newer, because both are Zephyr modules. rs_protocol V2.0.0 works with
+safebuffer V1.0.2 and V2.0.0. Older versions of rs_protocol set `sb->p_gp`, which was removed in safebuffer V2.0.0, so
+they only work with safebuffer V1.x.
+
+The tests use the safebuffer cloned next to rs_protocol if there is one, otherwise the one in the west workspace. Pass
+`-DSAFEBUFFER_DIR=<path>` (with twister `-x=SAFEBUFFER_DIR=<path>`) to use another copy.
+
+## Changes in V2.1.0
+
+- rs_protocol is now a Zephyr module, see [Import into Zephyr](#import-into-zephyr). Remove the `add_subdirectory`
+  line from your CMakeLists.txt and the `rsource` line from your Kconfig file.
+- `CONFIG_RS_PROTOCOL` is no longer enabled by default, set `CONFIG_RS_PROTOCOL=y` in prj.conf. It selects
+  `CONFIG_SAFEBUFFER`.
+- Needs safebuffer V2.1.0 or newer, which is also a Zephyr module. There are no changes to the code.
 
 ## Changes in V2.0.0
 
@@ -165,43 +177,52 @@ removed in safebuffer V2.0.0, so they only work with safebuffer V1.x.
 
 ## Import into Zephyr
 
-This code can be cloned as part of the user's code, but can also be cloned into your Zephyr library. The advantage of this is, if it is cloned into Zephyr once, it will be available to all your Zephyr projects.
-
-For the examples below, we are assuming Nordic NCS 2.9.0. Please adjust to your version.
-
-If you are using Nordic's NCS, open west.yml located at:<br>
-C:\ncs\v2.9.0\nrf\west.yml
-
-Under remotes, add:
+rs_protocol is a Zephyr module (see zephyr/module.yml), so Zephyr finds it by itself once it is in the west workspace or
+listed in `ZEPHYR_EXTRA_MODULES`. No changes to CMakeLists.txt or Kconfig are needed, enable it in prj.conf:
 ```
-    - name: rs_protocol
+CONFIG_RS_PROTOCOL=y
+```
+
+`CONFIG_RS_PROTOCOL` selects `CONFIG_SAFEBUFFER`, but safebuffer must also be added to the workspace or
+`ZEPHYR_EXTRA_MODULES`, as shown below.
+
+### Workspace application
+
+If your application has its own west.yml (a workspace application, for example one started from Nordic's
+ncs-example-application), add the library to that west.yml. Don't edit the west.yml of the SDK (nrf/west.yml), the
+change is lost when the SDK is updated and is not part of your project.
+
+Under remotes, add (once for all Robospace libraries):
+```
+    - name: robospace
       url-base: https://github.com/RobospaceNZ
 ```
 
 Under projects, add:
 ```
     - name: rs_protocol
-      remote: rs_protocol
-      revision: V2.0.0
+      remote: robospace
+      revision: V2.1.0
       path: modules/lib/rs_protocol
+    - name: safebuffer
+      remote: robospace
+      revision: V2.1.0
+      path: modules/lib/safebuffer
 ```
 
-Open command prompt in C:\ncs\v2.9.0. Remember to update b620d30767 if you use a different NCS (See C:\ncs\toolchains\toolchains.json for the version codes). Run the following:
+Then run `west update` in the workspace folder.
+
+### Freestanding application
+
+If your application uses an SDK installed under C:\ncs, add the library to your application, for example as a git
+submodule:
 ```
-SET PATH=C:\ncs\toolchains\b620d30767\opt\bin;C:\ncs\toolchains\b620d30767\opt\bin\Scripts;%PATH%
-west update
+git submodule add https://github.com/RobospaceNZ/rs_protocol libs/rs_protocol
+git submodule add https://github.com/RobospaceNZ/safebuffer libs/safebuffer
 ```
 
-The rs_protocol code will be located at:<br>
-C:\ncs\v2.9.0\modules\lib\rs_protocol
-
-Add the following to your CMakeLists.txt file:
+Add the following to your CMakeLists.txt file, before `find_package(Zephyr ...)`:
 ```
-set(RS_PROTOCOL_SRC ${ZEPHYR_BASE}/../modules/lib/rs_protocol)
-add_subdirectory(${RS_PROTOCOL_SRC} ${CMAKE_BINARY_DIR}/rs_protocol_build)
-```
-
-Add the following to your Kconfig file:
-```
-rsource "${ZEPHYR_BASE}/../modules/lib/rs_protocol/Kconfig.rs_protocol"
+list(APPEND ZEPHYR_EXTRA_MODULES ${CMAKE_CURRENT_SOURCE_DIR}/libs/rs_protocol)
+list(APPEND ZEPHYR_EXTRA_MODULES ${CMAKE_CURRENT_SOURCE_DIR}/libs/safebuffer)
 ```
