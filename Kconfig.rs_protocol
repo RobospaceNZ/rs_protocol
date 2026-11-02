@@ -6,7 +6,18 @@ if RS_PROTOCOL
 
 config RS_PROTOCOL_MAX_INSTANCES
     int "RS Protocol max instances"
-    default 2
+    default 4
+    range 1 254
+    help
+      Maximum number of instances that can be created with init_rs_protocol.
+
+config RS_PROTOCOL_MAX_PACKET_SIZE
+    int "RS Protocol max received packet size"
+    default 4096
+    range 0 65535
+    help
+      Largest payload in bytes that will be received. Larger packets are rejected with
+      RS_PACKET_ERROR_PACKET_LENGTH before memory is allocated for them.
 
 endif # RS_PROTOCOL
 

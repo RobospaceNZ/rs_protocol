@@ -12,11 +12,29 @@ This protocol has an 8 byte header built up as follows:
 | 4    | Message CRC MSB    |
 | 5    | Message CRC LSB    |
 | 6    | Header CRC MSB     |
-| 7    | Header CRC MSB     |
+| 7    | Header CRC LSB     |
 
-Set CONFIG_RS_PROTOCOL_MAX_INSTANCES to the maximum number of instances, it defaults to 2
+The CRC is CRC-16/XMODEM (polynomial 0x1021, initial value 0). The header CRC is calculated over bytes 0 to 5.
+This is the same packet format as the TpProtocolV2 library used on STM32.
 
-Use init_rs_protocol to create a new instance. This function specifies the values of the 2 header bytes.
+Set CONFIG_RS_PROTOCOL_MAX_INSTANCES to the maximum number of instances, it defaults to 4.
+
+Set CONFIG_RS_PROTOCOL_MAX_PACKET_SIZE to the largest payload that will be received, it defaults to 4096. Larger
+packets are rejected with RS_PACKET_ERROR_PACKET_LENGTH before memory is allocated for them. Empty packets, with a
+payload length of 0, are allowed.
+
+Use init_rs_protocol to create a new instance. This function specifies the values of the 2 header bytes. Instances can
+be created from different threads, but each instance must only be used by one thread.
+
+If a packet fails its header or data CRC, the bytes received after its first header byte are processed again. When a
+byte went missing, the next packet started inside the failed packet, so it is still received.
+
+The safebuffer passed to the callback with RS_PACKET_VALID_DATA is freed when the callback returns, copy the data if it
+is needed later.
+
+The build functions return -ENOMEM if the packet does not fit in the safebuffer, then no partial packet is built.
+rs_protocol_build_single_param and rs_protocol_build_multiple_params return NULL if the instance is not valid or the
+payload is larger than 65535 bytes.
 
 The callback function typically looks like this:
 
@@ -59,6 +77,9 @@ This library has a dependency on safebuffer:
 
 https://github.com/RobospaceNZ/safebuffer
 
+rs_protocol V1.1.0 works with safebuffer V1.0.2 and V2.0.0. Older versions of rs_protocol set `sb->p_gp`, which was
+removed in safebuffer V2.0.0, so they only work with safebuffer V1.x.
+
 ## Import into Zephyr
 
 This code can be cloned as part of the user's code, but can also be cloned into your Zephyr library. The advantage of this is, if it is cloned into Zephyr once, it will be available to all your Zephyr projects.
@@ -78,7 +99,7 @@ Under projects, add:
 ```
     - name: rs_protocol
       remote: rs_protocol
-      revision: V1.0.2
+      revision: V1.1.0
       path: modules/lib/rs_protocol
 ```
 
@@ -88,7 +109,7 @@ SET PATH=C:\ncs\toolchains\b620d30767\opt\bin;C:\ncs\toolchains\b620d30767\opt\b
 west update
 ```
 
-The safe buffer code will be located at:<br>
+The rs_protocol code will be located at:<br>
 C:\ncs\v2.9.0\modules\lib\rs_protocol
 
 Add the following to your CMakeLists.txt file:

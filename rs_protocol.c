@@ -24,13 +24,17 @@
  */
 
 #include <zephyr/kernel.h>
-#include <stdlib.h>
+#include <string.h>
 #include <errno.h>
 #include "rs_protocol.h"
 #include "safebuffer.h"
 
 #define HEADER_BUF_SIZE                                 8
 #define HEADER_CRC_CALC_SIZE                            6
+#define MAX_PAYLOAD_LEN                                 0xFFFF  // The length in the header is 16 bits
+// After an error the bytes received after the first header byte are processed again, because a real packet can start
+// in them. A packet found that way can fail again, this limits how many times that is done.
+#define MAX_RESYNC_DEPTH                                4
 
 typedef enum {
     RS_HEADER_BYTE_1,
@@ -59,6 +63,7 @@ rs_protocol_data_t;
 
 static uint8_t rs_protocol_num_instances = 0;
 static rs_protocol_data_t *rs_protocol_data[CONFIG_RS_PROTOCOL_MAX_INSTANCES];
+static struct k_spinlock instance_lock;
 
 static const uint16_t crcTabccitt[] = {
     0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50a5, 0x60c6, 0x70e7,
@@ -95,28 +100,46 @@ static const uint16_t crcTabccitt[] = {
     0x6e17, 0x7e36, 0x4e55, 0x5e74, 0x2e93, 0x3eb2, 0x0ed1, 0x1ef0
 };
 
+// Return the instance data, NULL if the instance number is not valid
+static rs_protocol_data_t *get_instance(uint8_t instance_num) {
+    if (instance_num >= rs_protocol_num_instances) {
+        return NULL;   // index out of range
+    }
+    return rs_protocol_data[instance_num];
+}
+
 // Initialise variables used for protocol
-// Return instance number for this protocol
+// Return instance number for this protocol, RS_PROTOCOL_INVALID_INSTANCE if no more instances can be created
 uint8_t init_rs_protocol(void (*message_received_function)(safebuffer_t *sb, rsp_packet_type_t packet_type, void *source), uint8_t header_byte_1, uint8_t header_byte_2) {
     rs_protocol_data_t *rsp;
     uint8_t instance_num;
+    k_spinlock_key_t key;
 
-    if (rs_protocol_num_instances >= CONFIG_RS_PROTOCOL_MAX_INSTANCES)
-    {
+    if (message_received_function == NULL) {
         return RS_PROTOCOL_INVALID_INSTANCE;
     }
-    instance_num = rs_protocol_num_instances++;
+    // Allocate first, so a failed allocation does not use up an instance
     rsp = k_malloc(sizeof(rs_protocol_data_t));
-    if (rsp) {
-        rs_protocol_data[instance_num] = rsp;
-        rsp->message_received_cb = message_received_function;
-        rsp->sb = NULL;
-        rsp->state = RS_HEADER_BYTE_1;
-        rsp->header_byte_1 = header_byte_1;
-        rsp->header_byte_2 = header_byte_2;
-    } else {
-        instance_num = RS_PROTOCOL_INVALID_INSTANCE;
+    if (rsp == NULL) {
+        return RS_PROTOCOL_INVALID_INSTANCE;
     }
+    rsp->message_received_cb = message_received_function;
+    rsp->sb = NULL;
+    rsp->state = RS_HEADER_BYTE_1;
+    rsp->header_byte_1 = header_byte_1;
+    rsp->header_byte_2 = header_byte_2;
+
+    // Instances can be created from different threads at the same time
+    key = k_spin_lock(&instance_lock);
+    if (rs_protocol_num_instances >= CONFIG_RS_PROTOCOL_MAX_INSTANCES) {
+        k_spin_unlock(&instance_lock, key);
+        k_free(rsp);
+        return RS_PROTOCOL_INVALID_INSTANCE;
+    }
+    instance_num = rs_protocol_num_instances;
+    rs_protocol_data[instance_num] = rsp;
+    rs_protocol_num_instances++;    // Only count the instance once it can be used
+    k_spin_unlock(&instance_lock, key);
     return instance_num;
 }
 
@@ -144,20 +167,37 @@ uint16_t calculate_CRC16(uint8_t *data, uint32_t len, uint16_t start_value) {
 
 // Build a protocol packet that can be sent to another device using a Safe Buffer as input
 int rs_protocol_build_safebuffer(safebuffer_t *sb_out, safebuffer_t *sb_in, uint8_t instance_num) {
-    return rs_protocol_build(sb_out, sb_in->buf, sb_in->write_index, instance_num);
+    if (sb_in == NULL) {
+        return -EFAULT;
+    }
+    if (sb_in->write_index > MAX_PAYLOAD_LEN) {
+        return -EINVAL;   // Does not fit in the 16 bit length
+    }
+    return rs_protocol_build(sb_out, sb_in->buf, (uint16_t)sb_in->write_index, instance_num);
 }
 
 // Build a protocol packet that can be sent to another device
 // sb: Pointer to a safe buffer that will be used for building the protocol. It must be initialised before use
+// Return -ENOMEM if the packet does not fit in sb, then sb is left empty
 int rs_protocol_build(safebuffer_t *sb, uint8_t *data, uint16_t len, uint8_t instance_num) {
     uint16_t crc;
     rs_protocol_data_t *rsp;
 
-    if (instance_num >= rs_protocol_num_instances) {
-        return -EINVAL;   // index out of range
+    rsp = get_instance(instance_num);
+    if (rsp == NULL) {
+        return -EINVAL;
     }
-    rsp = rs_protocol_data[instance_num];
+    if (sb == NULL) {
+        return -EFAULT;
+    }
+    if ((data == NULL) && len) {
+        return -EINVAL;
+    }
     safebuffer_reset(sb);
+    if (safebuffer_get_data_left_count(sb) < (uint32_t)len + HEADER_BUF_SIZE) {
+        // Don't build a packet that is cut short, its header would claim more data than was added
+        return -ENOMEM;
+    }
     safebuffer_add_char(sb, rsp->header_byte_1);
     safebuffer_add_char(sb, rsp->header_byte_2);
     safebuffer_add_char(sb, (uint8_t)(len >> 8));
@@ -172,16 +212,22 @@ int rs_protocol_build(safebuffer_t *sb, uint8_t *data, uint16_t len, uint8_t ins
     return 0;
 }
 
-// Build a protocol, this is used to build the header in place
+// Build a protocol, this is used to build the header in place. out must have space for RS_PROTOCOL_HEADER_OVERHEAD bytes
 int rs_protocol_build_header(uint8_t *out, uint8_t *data, uint16_t len, uint8_t instance_num) {
     uint8_t *p = out;
     uint16_t crc;
     rs_protocol_data_t *rsp;
 
-    if (instance_num >= rs_protocol_num_instances) {
-        return -EINVAL;   // index out of range
+    rsp = get_instance(instance_num);
+    if (rsp == NULL) {
+        return -EINVAL;
     }
-    rsp = rs_protocol_data[instance_num];
+    if (out == NULL) {
+        return -EFAULT;
+    }
+    if ((data == NULL) && len) {
+        return -EINVAL;
+    }
     *p++ = rsp->header_byte_1;
     *p++ = rsp->header_byte_2;
     *p++ = (uint8_t)(len >> 8);
@@ -189,45 +235,53 @@ int rs_protocol_build_header(uint8_t *out, uint8_t *data, uint16_t len, uint8_t 
     crc = calculate_CRC16(data, len, 0);
     *p++ = (uint8_t)(crc >> 8);
     *p++ = (uint8_t)(crc & 0xff);
-    crc = calculate_CRC16(out, 6, 0);
+    crc = calculate_CRC16(out, HEADER_CRC_CALC_SIZE, 0);
     *p++ = (uint8_t)(crc >> 8);
     *p++ = (uint8_t)(crc & 0xff);
     return 0;
 }
 
 // Build a protocol packet header and add it to a safe buffer. The safe buffer is not reset before adding the header.
+// Return -ENOMEM if there is no space for the whole header, then nothing is added
 int rs_protocol_add_packet_header(safebuffer_t *sb, uint8_t *data, uint16_t len, uint8_t instance_num) {
-    uint16_t crc;
-    uint8_t *p;
     rs_protocol_data_t *rsp;
+    int err;
 
-    if (instance_num >= rs_protocol_num_instances) {
-        return -EINVAL;   // index out of range
+    rsp = get_instance(instance_num);
+    if (rsp == NULL) {
+        return -EINVAL;
     }
-    rsp = rs_protocol_data[instance_num];
-    p = &sb->buf[sb->write_index];
-    safebuffer_add_char(sb, rsp->header_byte_1);
-    safebuffer_add_char(sb, rsp->header_byte_2);
-    safebuffer_add_char(sb, (uint8_t)(len >> 8));
-    safebuffer_add_char(sb, (uint8_t)(len & 0xff));
-    crc = calculate_CRC16(data, len, 0);
-    safebuffer_add_char(sb, (uint8_t)(crc >> 8));
-    safebuffer_add_char(sb, (uint8_t)(crc & 0xff));
-    crc = calculate_CRC16(p, HEADER_CRC_CALC_SIZE, 0);
-    safebuffer_add_char(sb, (uint8_t)(crc >> 8));
-    safebuffer_add_char(sb, (uint8_t)(crc & 0xff));
+    if (sb == NULL) {
+        return -EFAULT;
+    }
+    if (safebuffer_get_data_left_count(sb) < HEADER_BUF_SIZE) {
+        return -ENOMEM;
+    }
+    err = rs_protocol_build_header(&sb->buf[sb->write_index], data, len, instance_num);
+    if (err) {
+        return err;
+    }
+    sb->write_index += HEADER_BUF_SIZE;
+    if (sb->write_index >= sb->len) {
+        sb->full = true;
+    }
     return 0;
 }
 
 // Build a protocol packet with a single parameter that can be sent to another device
-// Return safebuffer must be freed by the caller
+// Return safebuffer must be freed by the caller, NULL if it could not be built
 safebuffer_t *rs_protocol_build_single_param(uint8_t *buf, uint32_t len, uint8_t instance_num) {
     safebuffer_t *sb;
 
+    if ((get_instance(instance_num) == NULL) || (len > MAX_PAYLOAD_LEN) || ((buf == NULL) && len)) {
+        return NULL;
+    }
     sb = safebuffer_malloc(len + HEADER_BUF_SIZE);
     if (sb) {
-        memcpy(sb->buf + HEADER_BUF_SIZE, buf, len);
-        rs_protocol_build_header(sb->buf, buf, len, instance_num);
+        if (len) {
+            memcpy(sb->buf + HEADER_BUF_SIZE, buf, len);
+        }
+        rs_protocol_build_header(sb->buf, buf, (uint16_t)len, instance_num);
         sb->write_index = len + HEADER_BUF_SIZE;
         sb->len = sb->write_index;
         sb->full = true;
@@ -236,23 +290,34 @@ safebuffer_t *rs_protocol_build_single_param(uint8_t *buf, uint32_t len, uint8_t
 }
 
 // Build a protocol packet with multiple parameters that can be sent to another device
-// Return safebuffer must be freed by the caller
+// Return safebuffer must be freed by the caller, NULL if it could not be built
 safebuffer_t *rs_protocol_build_multiple_params(uint8_t **buf, uint32_t *len, uint32_t num_items, uint8_t instance_num) {
-    uint32_t total_len = HEADER_BUF_SIZE;
+    uint32_t payload_len = 0;
     uint32_t i;
 
-    for (i = 0; i < num_items; i++) {
-        total_len += len[i];
+    if ((get_instance(instance_num) == NULL) || (num_items && ((buf == NULL) || (len == NULL)))) {
+        return NULL;
     }
-    safebuffer_t *sb = safebuffer_malloc(total_len);
+    for (i = 0; i < num_items; i++) {
+        if ((buf[i] == NULL) && len[i]) {
+            return NULL;
+        }
+        if (len[i] > MAX_PAYLOAD_LEN - payload_len) {
+            return NULL;   // Does not fit in the 16 bit length
+        }
+        payload_len += len[i];
+    }
+    safebuffer_t *sb = safebuffer_malloc(payload_len + HEADER_BUF_SIZE);
     if (sb) {
         uint8_t *p = &sb->buf[HEADER_BUF_SIZE];
         for (i = 0; i < num_items; i++) {
-            memcpy(p, buf[i], len[i]);
-            p += len[i];
+            if (len[i]) {
+                memcpy(p, buf[i], len[i]);
+                p += len[i];
+            }
         }
-        rs_protocol_build_header(sb->buf, &sb->buf[HEADER_BUF_SIZE], total_len - HEADER_BUF_SIZE, instance_num);
-        sb->write_index = total_len;
+        rs_protocol_build_header(sb->buf, &sb->buf[HEADER_BUF_SIZE], (uint16_t)payload_len, instance_num);
+        sb->write_index = payload_len + HEADER_BUF_SIZE;
         sb->len = sb->write_index;
         sb->full = true;
     }
@@ -262,10 +327,10 @@ safebuffer_t *rs_protocol_build_multiple_params(uint8_t **buf, uint32_t *len, ui
 int rs_protocol_reset_receive(uint8_t instance_num) {
     rs_protocol_data_t *rsp;
 
-    if (instance_num >= rs_protocol_num_instances) {
-        return -EINVAL;   // index out of range
+    rsp = get_instance(instance_num);
+    if (rsp == NULL) {
+        return -EINVAL;
     }
-    rsp = rs_protocol_data[instance_num];
     rsp->state = RS_HEADER_BYTE_1;
     if (rsp->sb) {
         safebuffer_free(rsp->sb);
@@ -274,16 +339,41 @@ int rs_protocol_reset_receive(uint8_t instance_num) {
     return 0;
 }
 
-// Process a byte that was received. If a complete message was received then the callback function will be called
-int rs_protocol_process_data(uint8_t *data, uint32_t len, uint8_t instance_num, void *source) {
-    rs_protocol_data_t *rsp;
+static void process_bytes(rs_protocol_data_t *rsp, uint8_t *data, uint32_t len, void *source, uint8_t depth);
+
+// Called when a packet failed. A byte might have been lost, then the real start of the next packet can be in the bytes
+// already received. Process them again, starting after the first header byte so the same packet is not found again.
+// payload: Data of the failed packet, NULL if the header was not valid
+static void resync(rs_protocol_data_t *rsp, uint8_t *payload, uint32_t payload_len, void *source, uint8_t depth) {
+    uint8_t header[HEADER_BUF_SIZE - 1];
+
+    rsp->state = RS_HEADER_BYTE_1;
+    if (depth >= MAX_RESYNC_DEPTH) {
+        return;
+    }
+    // header_buf changes while processing, use a copy
+    memcpy(header, &rsp->header_buf[1], sizeof(header));
+    process_bytes(rsp, header, sizeof(header), source, depth + 1);
+    if (payload_len) {
+        process_bytes(rsp, payload, payload_len, source, depth + 1);
+    }
+}
+
+// A valid packet was received, pass it to the callback
+static void packet_received(rs_protocol_data_t *rsp, void *source) {
+    safebuffer_t *sb = rsp->sb;
+
+    // The callback may call rs_protocol_reset_receive or process more data, so the packet is taken out of rsp first
+    rsp->sb = NULL;
+    rsp->state = RS_HEADER_BYTE_1;
+    rsp->message_received_cb(sb, RS_PACKET_VALID_DATA, source);
+    safebuffer_free(sb);
+}
+
+static void process_bytes(rs_protocol_data_t *rsp, uint8_t *data, uint32_t len, void *source, uint8_t depth) {
     uint32_t i;
     uint8_t c;
 
-    if (instance_num >= rs_protocol_num_instances) {
-        return -EINVAL;   // index out of range
-    }
-    rsp = rs_protocol_data[instance_num];
     for (i = 0; i < len; i++) {
         c = *data++;
         switch(rsp->state) {
@@ -324,28 +414,50 @@ int rs_protocol_process_data(uint8_t *data, uint32_t len, uint8_t instance_num, 
             case RS_HEADER_CRC_BYTE_1:
                 rsp->crc = c;
                 rsp->crc <<= 8;
+                rsp->header_buf[6] = c;
                 rsp->state = RS_HEADER_CRC_BYTE_2;
                 break;
             case RS_HEADER_CRC_BYTE_2:
                 rsp->crc |= c;
-                if (rsp->crc == calculate_CRC16(rsp->header_buf, HEADER_CRC_CALC_SIZE, 0)) {
-                    rsp->state = RS_DATA;
-                    rsp->header_buf[6] = rsp->crc >> 8;
-                    rsp->header_buf[7] = rsp->crc;
-                    if (rsp->sb) {
-                        safebuffer_free(rsp->sb);
-                    }
-                    rsp->sb = safebuffer_malloc(rsp->len);
-                    if (rsp->sb == NULL) {
-                        // Unable to allocate enough memory for the message
-                        rsp->message_received_cb(NULL, RS_PACKET_ERROR_PACKET_LENGTH, source);
-                        rsp->state = RS_HEADER_BYTE_1;
-                        break;
-                    }
-                } else {
+                rsp->header_buf[7] = c;
+                if (rsp->crc != calculate_CRC16(rsp->header_buf, HEADER_CRC_CALC_SIZE, 0)) {
                     rsp->message_received_cb(NULL, RS_PACKET_ERROR_HEADER_CRC, source);
-                    rsp->state = RS_HEADER_BYTE_1;
+                    resync(rsp, NULL, 0, source, depth);
+                    break;
                 }
+                if (rsp->sb) {
+                    safebuffer_free(rsp->sb);
+                    rsp->sb = NULL;
+                }
+                if (rsp->len > CONFIG_RS_PROTOCOL_MAX_PACKET_SIZE) {
+                    // Too large, reject it before trying to allocate memory for it
+                    rsp->message_received_cb(NULL, RS_PACKET_ERROR_PACKET_LENGTH, source);
+                    resync(rsp, NULL, 0, source, depth);
+                    break;
+                }
+                if (rsp->len == 0) {
+                    // Empty packet, there is no data to wait for
+                    safebuffer_t empty;
+                    uint16_t data_crc = ((uint16_t)rsp->header_buf[4] << 8) | rsp->header_buf[5];
+
+                    rsp->state = RS_HEADER_BYTE_1;
+                    if (data_crc == calculate_CRC16(NULL, 0, 0)) {
+                        safebuffer_init(&empty, NULL, 0);
+                        rsp->message_received_cb(&empty, RS_PACKET_VALID_DATA, source);
+                    } else {
+                        rsp->message_received_cb(NULL, RS_PACKET_ERROR_DATA_CRC, source);
+                        resync(rsp, NULL, 0, source, depth);
+                    }
+                    break;
+                }
+                rsp->sb = safebuffer_malloc(rsp->len);
+                if (rsp->sb == NULL) {
+                    // Unable to allocate enough memory for the message
+                    rsp->message_received_cb(NULL, RS_PACKET_ERROR_PACKET_LENGTH, source);
+                    resync(rsp, NULL, 0, source, depth);
+                    break;
+                }
+                rsp->state = RS_DATA;
                 break;
             case RS_DATA:
                 safebuffer_add_char(rsp->sb, c);
@@ -354,17 +466,35 @@ int rs_protocol_process_data(uint8_t *data, uint32_t len, uint8_t instance_num, 
                     rsp->crc <<= 8;
                     rsp->crc |= rsp->header_buf[5];
                     if (rsp->crc == calculate_CRC16(rsp->sb->buf, rsp->len, 0)) {
-                        rsp->sb->p_gp = rsp->header_buf;
-                        rsp->message_received_cb(rsp->sb, RS_PACKET_VALID_DATA, source);
-                        safebuffer_free(rsp->sb);
-                        rsp->sb = NULL;
+                        packet_received(rsp, source);
                     } else {
+                        // The data of the failed packet is processed again, the next packet can start in it
+                        safebuffer_t *failed = rsp->sb;
+
+                        rsp->sb = NULL;
                         rsp->message_received_cb(NULL, RS_PACKET_ERROR_DATA_CRC, source);
+                        resync(rsp, failed->buf, failed->write_index, source, depth);
+                        safebuffer_free(failed);
                     }
-                    rsp->state = RS_HEADER_BYTE_1;
                 }
                 break;
         }
     }
+}
+
+// Process data that was received. If a complete message was received then the callback function will be called.
+// If a packet fails, the bytes after the start of the failed packet are processed again, so the next packet is not
+// lost when a byte went missing.
+int rs_protocol_process_data(uint8_t *data, uint32_t len, uint8_t instance_num, void *source) {
+    rs_protocol_data_t *rsp;
+
+    rsp = get_instance(instance_num);
+    if (rsp == NULL) {
+        return -EINVAL;
+    }
+    if ((data == NULL) && len) {
+        return -EINVAL;
+    }
+    process_bytes(rsp, data, len, source, 0);
     return 0;
 }
