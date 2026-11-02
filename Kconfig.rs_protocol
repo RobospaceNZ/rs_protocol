@@ -1,15 +1,26 @@
 menuconfig RS_PROTOCOL
     bool "RS Protocol"
 	default y
+	select CRC if !RS_PROTOCOL_CRC_TABLE
 
 if RS_PROTOCOL
+
+config RS_PROTOCOL_LEGACY_API
+    bool "Legacy API with instance numbers"
+    default y
+    help
+      Keep init_rs_protocol and the other functions that identify an instance by a number,
+      so code written for rs_protocol V1.x still compiles. New code should use struct
+      rs_protocol with RS_PROTOCOL_DEFINE or rs_protocol_init.
 
 config RS_PROTOCOL_MAX_INSTANCES
     int "RS Protocol max instances"
     default 4
     range 1 254
+    depends on RS_PROTOCOL_LEGACY_API
     help
-      Maximum number of instances that can be created with init_rs_protocol.
+      Maximum number of instances that can be created with init_rs_protocol. Instances
+      created with RS_PROTOCOL_DEFINE or rs_protocol_init are not limited.
 
 config RS_PROTOCOL_MAX_PACKET_SIZE
     int "RS Protocol max received packet size"
@@ -18,6 +29,12 @@ config RS_PROTOCOL_MAX_PACKET_SIZE
     help
       Largest payload in bytes that will be received. Larger packets are rejected with
       RS_PACKET_ERROR_PACKET_LENGTH before memory is allocated for them.
+
+config RS_PROTOCOL_CRC_TABLE
+    bool "Use a lookup table for the CRC"
+    help
+      Calculate the CRC with a 512 byte lookup table, which is faster. Otherwise Zephyr's
+      crc16_itu_t is used, which gives the same CRC without the table.
 
 endif # RS_PROTOCOL
 

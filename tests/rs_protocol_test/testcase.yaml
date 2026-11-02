@@ -1,9 +1,15 @@
+common:
+  # native_sim runs the tests on a Linux host without hardware, for example in CI
+  platform_allow:
+    - nrf52840dk/nrf52840
+    - native_sim
+  tags: rs_protocol
+  harness: ztest
+  timeout: 300
 tests:
-  rs_protocol.test:
-    # native_sim runs the tests on a Linux host without hardware, for example in CI
-    platform_allow:
-      - nrf52840dk/nrf52840
-      - native_sim
-    tags: rs_protocol
-    harness: ztest
-    timeout: 300
+  # CRC calculated with Zephyr's crc16_itu_t
+  rs_protocol.test: {}
+  # CRC calculated with the lookup table, the CRC tests check that both give the same result
+  rs_protocol.test.crc_table:
+    extra_configs:
+      - CONFIG_RS_PROTOCOL_CRC_TABLE=y

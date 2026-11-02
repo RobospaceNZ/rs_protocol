@@ -17,36 +17,20 @@ This protocol has an 8 byte header built up as follows:
 The CRC is CRC-16/XMODEM (polynomial 0x1021, initial value 0). The header CRC is calculated over bytes 0 to 5.
 This is the same packet format as the TpProtocolV2 library used on STM32.
 
-Set CONFIG_RS_PROTOCOL_MAX_INSTANCES to the maximum number of instances, it defaults to 4.
+## How to use
 
-Set CONFIG_RS_PROTOCOL_MAX_PACKET_SIZE to the largest payload that will be received, it defaults to 4096. Larger
-packets are rejected with RS_PACKET_ERROR_PACKET_LENGTH before memory is allocated for them. Empty packets, with a
-payload length of 0, are allowed.
-
-Use init_rs_protocol to create a new instance. This function specifies the values of the 2 header bytes. Instances can
-be created from different threads, but each instance must only be used by one thread.
-
-If a packet fails its header or data CRC, the bytes received after its first header byte are processed again. When a
-byte went missing, the next packet started inside the failed packet, so it is still received.
-
-The safebuffer passed to the callback with RS_PACKET_VALID_DATA is freed when the callback returns, copy the data if it
-is needed later.
-
-The build functions return -ENOMEM if the packet does not fit in the safebuffer, then no partial packet is built.
-rs_protocol_build_single_param and rs_protocol_build_multiple_params return NULL if the instance is not valid or the
-payload is larger than 65535 bytes.
-
-The callback function typically looks like this:
+An instance is a `struct rs_protocol`. Define it with the 2 header bytes and the callback that is called for every
+packet received:
 
 ```
-static void rsp_message_received_function(safebuffer_t *sb, rsp_packet_type_t packet_type, void *source) {
+static void message_received(struct rs_protocol *rsp, safebuffer_t *sb, rsp_packet_type_t packet_type, void *source) {
     switch (packet_type) {
         case RS_PACKET_PREAMBLE_RECEIVED:
             break;
         case RS_PACKET_VALID_DATA:
             // Process data received
             // Data in sb->buf
-            // Size of buffer in sb->write_index
+            // Size of the data in sb->write_index
             break;
         case RS_PACKET_ERROR_HEADER_CRC:
             LOG_ERR("Header CRC error");
@@ -63,15 +47,96 @@ static void rsp_message_received_function(safebuffer_t *sb, rsp_packet_type_t pa
     }
 }
 
-static void thread_fn(void) {
-    uint8_t rsp_instance;
-    
-    rsp_instance = init_rs_protocol(rsp_message_received_function, 'R', 'S');
+RS_PROTOCOL_DEFINE(stm32_link, 'T', 'P', message_received);
 
-    // data received in buf, size in len
-    rs_protocol_process_data(buf, len, rsp_instance, NULL);
+static void thread_fn(void) {
+    // Data received in buf, size in len
+    rs_protocol_process(&stm32_link, buf, len, NULL);
+
+    // Send a packet
+    uint8_t out[RS_PROTOCOL_HEADER_OVERHEAD + 16];
+    safebuffer_t sb;
+    safebuffer_init(&sb, out, sizeof(out));
+    if (rs_protocol_packet_build(&stm32_link, &sb, payload, payload_len) == 0) {
+        // Send sb.buf, length sb.write_index
+    }
 }
 ```
+
+`source` is the value passed to `rs_protocol_process`, for example to tell which uart the data came from.
+`rsp->user_data` is free for your own use, for example to find a context structure in the callback.
+
+An instance can also be initialised at run time with `rs_protocol_init`, for example when it is part of another
+structure. Each instance must only be used by one thread.
+
+### Receive buffers
+
+By default a buffer is allocated on the heap for every packet received. It is passed to the callback and freed when the
+callback returns. To keep the packet without copying it, call `rs_protocol_take_packet` in the callback. It returns
+the safebuffer, which you must free with `safebuffer_free` when you are finished with it:
+```
+case RS_PACKET_VALID_DATA: {
+    safebuffer_t *packet = rs_protocol_take_packet(rsp);
+    // Pass packet to another thread, it frees it
+    break;
+}
+```
+
+To avoid allocating memory, define the instance with a static receive buffer. Packets larger than the buffer are
+rejected with RS_PACKET_ERROR_PACKET_LENGTH:
+```
+RS_PROTOCOL_DEFINE_STATIC_BUF(stm32_link, 'T', 'P', message_received, 512);
+```
+A packet in a static buffer is overwritten by the next packet, so `rs_protocol_take_packet` returns NULL and the data
+must be copied if it is needed after the callback. The same is true for empty packets.
+
+### Errors
+
+If a packet fails its header or data CRC, the bytes received after its first header byte are processed again. When a
+byte went missing, the next packet started inside the failed packet, so it is still received.
+
+`rs_protocol_reset` discards a packet that is partly received, for example after a uart error.
+
+The build functions return -ENOMEM if the packet does not fit in the safebuffer, then no partial packet is built.
+`rs_protocol_packet_alloc_single` and `rs_protocol_packet_alloc_multiple` return NULL if the payload is larger than
+65535 bytes or no memory is available.
+
+### Configuration
+
+| Option                             | Default | Description |
+|------------------------------------|---------|-------------|
+| CONFIG_RS_PROTOCOL_MAX_PACKET_SIZE | 4096    | Largest payload received. Larger packets are rejected before memory is allocated. Empty packets are allowed. |
+| CONFIG_RS_PROTOCOL_CRC_TABLE       | n       | Calculate the CRC with a 512 byte lookup table, which is faster. Otherwise Zephyr's crc16_itu_t is used, which gives the same CRC. |
+| CONFIG_RS_PROTOCOL_LEGACY_API      | y       | Keep the V1.0 functions that use instance numbers. |
+| CONFIG_RS_PROTOCOL_MAX_INSTANCES   | 4       | Number of instances that can be created with init_rs_protocol. |
+
+### Legacy API
+
+Code written for V1.0 still compiles while CONFIG_RS_PROTOCOL_LEGACY_API is enabled. `init_rs_protocol` returns an
+instance number that is passed to the other legacy functions:
+
+| Legacy function                    | New function                          |
+|------------------------------------|---------------------------------------|
+| init_rs_protocol                   | RS_PROTOCOL_DEFINE / rs_protocol_init |
+| rs_protocol_process_data           | rs_protocol_process                   |
+| rs_protocol_reset_receive          | rs_protocol_reset                     |
+| rs_protocol_build                  | rs_protocol_packet_build              |
+| rs_protocol_build_safebuffer       | rs_protocol_packet_build_safebuffer   |
+| rs_protocol_build_header           | rs_protocol_packet_build_header       |
+| rs_protocol_add_packet_header      | rs_protocol_packet_add_header         |
+| rs_protocol_build_single_param     | rs_protocol_packet_alloc_single       |
+| rs_protocol_build_multiple_params  | rs_protocol_packet_alloc_multiple     |
+| calculate_CRC16                    | rs_protocol_crc16                     |
+
+The legacy callback does not get the instance: `void callback(safebuffer_t *sb, rsp_packet_type_t packet_type, void
+*source)`. `rs_protocol_get_instance` returns the `struct rs_protocol` of an instance number, so legacy and new
+functions can be mixed while code is moved over.
+
+## Tests
+
+The tests are in tests/rs_protocol_test. They run twice, with Zephyr's crc16_itu_t and with the lookup table, and check
+that both give the CRC-16/XMODEM check value. Run them on an nRF52840 DK with tests/twister_ncs_2.9.0.bat and the COM
+port of the board, or on native_sim on Linux.
 
 This library has a dependency on safebuffer:
 
