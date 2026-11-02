@@ -107,12 +107,12 @@ The build functions return -ENOMEM if the packet does not fit in the safebuffer,
 |------------------------------------|---------|-------------|
 | CONFIG_RS_PROTOCOL_MAX_PACKET_SIZE | 4096    | Largest payload received. Larger packets are rejected before memory is allocated. Empty packets are allowed. |
 | CONFIG_RS_PROTOCOL_CRC_TABLE       | n       | Calculate the CRC with a 512 byte lookup table, which is faster. Otherwise Zephyr's crc16_itu_t is used, which gives the same CRC. |
-| CONFIG_RS_PROTOCOL_LEGACY_API      | y       | Keep the V1.0 functions that use instance numbers. |
+| CONFIG_RS_PROTOCOL_LEGACY_API      | y       | Keep the V1.x functions that use instance numbers. |
 | CONFIG_RS_PROTOCOL_MAX_INSTANCES   | 4       | Number of instances that can be created with init_rs_protocol. |
 
 ### Legacy API
 
-Code written for V1.0 still compiles while CONFIG_RS_PROTOCOL_LEGACY_API is enabled. `init_rs_protocol` returns an
+Code written for V1.x still compiles while CONFIG_RS_PROTOCOL_LEGACY_API is enabled. `init_rs_protocol` returns an
 instance number that is passed to the other legacy functions:
 
 | Legacy function                    | New function                          |
@@ -142,8 +142,26 @@ This library has a dependency on safebuffer:
 
 https://github.com/RobospaceNZ/safebuffer
 
-rs_protocol V1.1.0 works with safebuffer V1.0.2 and V2.0.0. Older versions of rs_protocol set `sb->p_gp`, which was
+rs_protocol V2.0.0 works with safebuffer V1.0.2 and V2.0.0. Older versions of rs_protocol set `sb->p_gp`, which was
 removed in safebuffer V2.0.0, so they only work with safebuffer V1.x.
+
+## Changes in V2.0.0
+
+- New API with `struct rs_protocol` instances, defined with `RS_PROTOCOL_DEFINE` or `RS_PROTOCOL_DEFINE_STATIC_BUF`,
+  or initialised with `rs_protocol_init`. The callback gets the instance, and `user_data` can be used for a context.
+- Static receive buffers, no memory is allocated when packets are received.
+- `rs_protocol_take_packet` keeps a received packet without copying it.
+- After a header CRC, data CRC or length error the received bytes are processed again, so the next packet is not lost
+  when a byte went missing.
+- `CONFIG_RS_PROTOCOL_MAX_PACKET_SIZE` limits the size of packets received, it defaults to 4096. Empty packets are
+  received as valid instead of a length error.
+- The CRC is calculated with Zephyr's crc16_itu_t, which gives the same CRC as before. `CONFIG_CRC` is enabled
+  automatically. Set `CONFIG_RS_PROTOCOL_CRC_TABLE=y` to use the lookup table.
+- The build functions return -ENOMEM instead of building a truncated packet, and check the instance and the 16 bit
+  length before allocating.
+- The V1.x functions are kept while `CONFIG_RS_PROTOCOL_LEGACY_API` is enabled, which is the default. The default
+  `CONFIG_RS_PROTOCOL_MAX_INSTANCES` is now 4.
+- `sb->p_gp` is no longer set.
 
 ## Import into Zephyr
 
@@ -164,7 +182,7 @@ Under projects, add:
 ```
     - name: rs_protocol
       remote: rs_protocol
-      revision: V1.1.0
+      revision: V2.0.0
       path: modules/lib/rs_protocol
 ```
 
